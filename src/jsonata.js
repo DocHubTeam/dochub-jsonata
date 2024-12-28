@@ -1076,6 +1076,40 @@ var jsonata = (function() {
     }
 
     /**
+     * Вызов обработчика шага отладки
+     * @param {*} step              - текущий шаг
+     * @param {*} input             - входящие данные
+     * @param {*} environment       - переменные среды
+     */
+    async function debugStep(step, $, input, environment) {
+        const debug = environment.__debugger__;
+        if (debug.debuggerHandle) {
+            debug.step = step;
+            if (
+                step.type === 'debugger' 
+                || (debug.action === 'into' )
+                || ((debug.action === 'next') &&  (debug.deep >= debug.stack.length))
+            ) {
+                debug.deep = debug.stack.length;
+                debug.action = await environment.__debugger__.debuggerHandle({
+                    $,
+                    step,
+                    input,
+                    environment
+                });
+                if (debug.action === 'stop') {
+                    throw {
+                        code: "DBG01",
+                        stack: (new Error()).stack,
+                        position: step.position,
+                        value: $
+                    };
+                }
+            }
+        }
+    }
+
+    /**
      * Evaluate block against input data
      * @param {Object} expr - JSONata expression
      * @param {Object} input - Input data to evaluate against
@@ -1090,9 +1124,10 @@ var jsonata = (function() {
         // invoke each expression in turn
         // only return the result of the last one
         for(var ii = 0; ii < expr.expressions.length; ii++) {
-            result = await evaluate(expr.expressions[ii], input, frame);
+            const step = expr.expressions[ii];
+            if (step.type !== 'debugger') result = await evaluate(expr.expressions[ii], input, frame);
+            debugStep(step, result, input, environment);
         }
-
         return result;
     }
 
@@ -1448,7 +1483,14 @@ var jsonata = (function() {
                 proc.token = procName;
                 proc.position = expr.position;
             }
-            result = await apply(proc, evaluatedArgs, input, environment);
+            if (environment && environment.__debugger__.debuggerHandle) {
+                environment.__debugger__.stack.push({
+                    entry: environment.__debugger__.step,
+                    source: environment.__debugger__.stack.slice(-1).source
+                });
+                result = await apply(proc, evaluatedArgs, input, environment);
+                environment.__debugger__.stack.pop();
+            } else result = await apply(proc, evaluatedArgs, input, environment);
         } catch (err) {
             if(!err.position) {
                 // add the position field to the error
@@ -1801,7 +1843,15 @@ var jsonata = (function() {
             };
         }
         try {
-            var result = await evaluate(ast, input, this.environment);
+            var result;
+            if (this.environment.__debugger__.debuggerHandle) {
+                this.environment.__debugger__.stack.push({
+                    entry: this.environment.__debugger__.step,
+                    source: expr
+                });
+                result = await evaluate(ast, input, this.environment);
+                this.environment.__debugger__.stack.pop();
+            } else result = await evaluate(ast, input, this.environment);
         } catch(err) {
             // error evaluating the expression passed to $eval
             populateMessage(err);
@@ -1855,7 +1905,8 @@ var jsonata = (function() {
             isParallelCall: enclosingEnvironment ? enclosingEnvironment.isParallelCall : false,
             global: enclosingEnvironment ? enclosingEnvironment.global : {
                 ancestry: [ null ]
-            }
+            },
+            __debugger__: enclosingEnvironment ? enclosingEnvironment.__debugger__ : {}
         };
 
         if (enclosingEnvironment) {
@@ -2045,7 +2096,8 @@ var jsonata = (function() {
         "D3138": "The $single() function expected exactly 1 matching result.  Instead it matched more.",
         "D3139": "The $single() function expected exactly 1 matching result.  Instead it matched 0.",
         "D3140": "Malformed URL passed to ${{{functionName}}}(): {{value}}",
-        "D3141": "{{{message}}}"
+        "D3141": "{{{message}}}",
+        "DBG01": "Interrupted by debugger"
     };
 
     /**
@@ -2109,7 +2161,15 @@ var jsonata = (function() {
         }
 
         return {
-            evaluate: async function (input, bindings, callback) {
+            /**
+             * Executing expression
+             * @param {*} input             - context
+             * @param {*} bindings          - variables
+             * @param {*} callback          - result callback
+             * @param {*} debuggerHandle    - Debugger async function
+             * @returns 
+             */
+            evaluate: async function (input, bindings, callback, debuggerHandle) {
                 // throw if the expression compiled with syntax errors
                 if(typeof errors !== 'undefined') {
                     var err = {
@@ -2132,6 +2192,17 @@ var jsonata = (function() {
                 }
                 // put the input document into the environment as the root object
                 exec_env.bind('$', input);
+
+                if (debuggerHandle) {
+                    exec_env.__debugger__.debuggerHandle = debuggerHandle
+                    exec_env.__debugger__.action = 'run';
+                    exec_env.__debugger__.deep = 1;
+                    exec_env.__debugger__.step = null;
+                    exec_env.__debugger__.stack = [{
+                        entry: null,
+                        source: expr
+                    }];
+                }
 
                 // capture the timestamp and put it in the execution environment
                 // the $now() and $millis() functions will return this value - whenever it is called
