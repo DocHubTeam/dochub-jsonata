@@ -52,7 +52,7 @@ const expression = jsonata(`(
 )`);
 const result = await expression.evaluate(data, undefined, undefined, async(context) => {
     console.info(context);
-    return 'next';  // The debug function must return one of the values: run / into / next
+    return 'next';  // The debug function must return one of the values: run / into / next / stop
 });
 ```
 
